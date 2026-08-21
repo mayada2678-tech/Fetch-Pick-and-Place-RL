@@ -35,6 +35,53 @@ def test_fetch_pick_and_place_gui_imports():
     assert hasattr(module, "FetchPickAndPlaceUI")
 
 
+def test_fetch_pick_and_place_supports_dense_reward_and_her_methods():
+    module_path = Path(__file__).with_name("fetch_pick_and_place_logic.py")
+    spec = spec_from_file_location("fetch_pick_and_place_logic", module_path)
+    assert spec is not None and spec.loader is not None
+
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert {"standard", "dense", "shaped"}.issubset(set(module.SUPPORTED_REWARD_MODES))
+    assert "HER-SAC" in module.SUPPORTED_METHODS
+    assert "HER-TD3" in module.SUPPORTED_METHODS
+
+
+def test_her_replay_buffer_kwargs_match_sb3_api(monkeypatch):
+    module_path = Path(__file__).with_name("fetch_pick_and_place_logic.py")
+    spec = spec_from_file_location("fetch_pick_and_place_logic", module_path)
+    assert spec is not None and spec.loader is not None
+
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    seen = {}
+
+    class FakeSAC:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(module, "SAC", FakeSAC)
+    config = module.OnPolicyConfig(method="HER-SAC", reward_mode="dense")
+
+    class FakeEnv:
+        observation_space = module.gym.spaces.Dict({
+            "observation": module.gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+            "desired_goal": module.gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+            "achieved_goal": module.gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
+        })
+        action_space = module.gym.spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+
+    model = module.FetchPickAndPlaceTrainer._create_model(config, FakeEnv())
+
+    assert model is not None
+    assert "replay_buffer_class" in seen
+    assert "replay_buffer_kwargs" in seen
+    assert "online_sampling" not in seen["replay_buffer_kwargs"]
+    assert seen["replay_buffer_kwargs"]["goal_selection_strategy"] == "future"
+
+
 def test_make_fetch_env_initializes_robotics_registration(monkeypatch):
     module_path = Path(__file__).with_name("fetch_pick_and_place_logic.py")
     spec = spec_from_file_location("fetch_pick_and_place_logic", module_path)
@@ -166,3 +213,44 @@ def test_make_fetch_env_falls_back_without_render_context(monkeypatch):
     assert calls[0] == "rgb_array"
     assert calls[-1] is None
     assert len(calls) == 3
+
+
+def test_sync_vector_env_adapter_delegates_compute_reward_to_unwrapped_env():
+    module_path = Path(__file__).with_name("fetch_pick_and_place_logic.py")
+    spec = spec_from_file_location("fetch_pick_and_place_logic", module_path)
+    assert spec is not None and spec.loader is not None
+
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeWrappedEnv:
+        def __init__(self):
+            self.unwrapped = self
+            self.compute_reward_called = False
+
+        def compute_reward(self, achieved_goal, desired_goal, info):
+            self.compute_reward_called = True
+            return 7.5
+
+    class FakeVecEnv:
+        num_envs = 1
+        single_observation_space = module.gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=float)
+        single_action_space = module.gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=float)
+
+        def __init__(self):
+            self.envs = [FakeWrappedEnv()]
+
+        def reset(self, seed=None, options=None):
+            return np.zeros((1, 2)), {}
+
+        def step(self, actions):
+            return np.zeros((1, 2)), np.zeros(1), np.zeros(1, dtype=bool), np.zeros(1, dtype=bool), [{}]
+
+        def close(self):
+            pass
+
+    adapter = module.SyncVectorEnvAdapter(FakeVecEnv())
+    result = adapter.env_method("compute_reward", np.array([1.0, 2.0]), np.array([3.0, 4.0]), {"info": 1}, indices=[0])
+
+    assert result == [7.5]
+    assert adapter.vector_env.envs[0].compute_reward_called is True

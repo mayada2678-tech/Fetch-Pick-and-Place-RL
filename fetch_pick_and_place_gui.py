@@ -39,9 +39,9 @@ class FetchPickAndPlaceUI(base.WorkbenchUI):
         self.configs = {method: logic.OnPolicyConfig(**logic.get_default_parameters_for_method(method)) for method in logic.SUPPORTED_METHODS}
         self.variables: dict[str, dict[str, tk.Variable]] = {method: {} for method in logic.SUPPORTED_METHODS}
         self.env_var = tk.StringVar(value="FetchPickAndPlace-v4")
-        self.method_var = tk.StringVar(value="PPO")
-        self.selected_method = tk.StringVar(value="PPO")
-        self.reward_mode_var = tk.StringVar(value="standard")
+        self.method_var = tk.StringVar(value="HER-SAC")
+        self.selected_method = tk.StringVar(value="HER-SAC")
+        self.reward_mode_var = tk.StringVar(value="dense")
         self.total_timesteps_var = tk.StringVar(value="1000000")
         self.training_stop_mode_var = tk.StringVar(value="timesteps")
         self.target_episodes_var = tk.StringVar(value="5000")
@@ -528,7 +528,8 @@ class FetchPickAndPlaceUI(base.WorkbenchUI):
         self.variables[method] = {}
         config = self.configs[method]
         shared = ("total_timesteps", "n_envs", "learning_rate", "gamma", "batch_size")
-        if method == "PPO":
+        base_method = logic.normalize_method_name(method)
+        if base_method == "PPO":
             create_fields = ("n_steps", "n_epochs", "gae_lambda", "clip_range", "ent_coef", "vf_coef", "max_grad_norm")
         else:
             create_fields = ("buffer_size", "learning_starts", "tau", "train_freq", "gradient_steps", "policy_delay", "ent_coef")

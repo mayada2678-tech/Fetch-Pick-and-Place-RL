@@ -17,8 +17,8 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 EventCallback = Callable[[dict[str, Any]], None]
-SUPPORTED_METHODS = ("SAC", "TD3", "PPO")
-SUPPORTED_REWARD_MODES = ("standard",)
+SUPPORTED_METHODS = ("HER-SAC", "HER-TD3", "SAC", "TD3", "PPO")
+SUPPORTED_REWARD_MODES = ("standard", "dense", "shaped")
 FETCH_PICK_AND_PLACE_ENV_ID = "FetchPickAndPlace-v4"
 FETCH_PICK_AND_PLACE_ENV_ID_FALLBACKS = ("FetchPickAndPlace-v4", "FetchPickAndPlace-v1")
 FETCH_PICK_AND_PLACE_SOLVED_REWARD = 200.0
@@ -42,7 +42,11 @@ def _ensure_gymnasium_robotics() -> None:
         ) from exc
 
 
-def make_fetch_env(render_mode: Optional[str] = None) -> gym.Env:
+def normalize_method_name(method: str) -> str:
+    return method.split("HER-", 1)[-1] if method.startswith("HER-") else method
+
+
+def make_fetch_env(render_mode: Optional[str] = None, reward_mode: str = "standard") -> gym.Env:
     _verify_mujoco_runtime()
     _ensure_gymnasium_robotics()
     last_error: Exception | None = None
@@ -52,10 +56,16 @@ def make_fetch_env(render_mode: Optional[str] = None) -> gym.Env:
     elif render_mode is None:
         render_attempts = [None]
 
+    reward_key = "sparse" if reward_mode == "standard" else "dense"
     for candidate_render_mode in render_attempts:
         for env_id in FETCH_PICK_AND_PLACE_ENV_ID_FALLBACKS:
             try:
-                return gym.make(env_id, render_mode=candidate_render_mode)
+                return gym.make(env_id, render_mode=candidate_render_mode, reward_type=reward_key)
+            except TypeError:
+                try:
+                    return gym.make(env_id, render_mode=candidate_render_mode)
+                except Exception as exc:  # pragma: no cover - depends on OS/display backend
+                    last_error = exc
             except ModuleNotFoundError as exc:  # pragma: no cover - depends on installation state
                 if exc.name == "gymnasium_robotics" or "gymnasium_robotics" in str(exc):
                     _ensure_gymnasium_robotics()
@@ -204,6 +214,10 @@ class OnPolicyConfig:
     def validate(self) -> None:
         if self.method not in SUPPORTED_METHODS:
             raise ValueError(f"Unterstützte Methoden: {', '.join(SUPPORTED_METHODS)}")
+        if self.reward_mode not in SUPPORTED_REWARD_MODES:
+            raise ValueError(f"reward_mode muss einer von {SUPPORTED_REWARD_MODES} sein.")
+        if normalize_method_name(self.method) not in {"PPO", "SAC", "TD3"}:
+            raise ValueError(f"Unbekannte Methode: {self.method}")
         if self.n_envs < 1:
             raise ValueError("n_envs muss mindestens 1 sein.")
         if not 0.0 <= self.gae_lambda <= 1.0:
@@ -219,10 +233,11 @@ class OnPolicyConfig:
 def get_default_parameters_for_method(method: str) -> dict[str, Any]:
     if method not in SUPPORTED_METHODS:
         raise ValueError(f"Unbekannte Methode: {method}")
+    base_method = normalize_method_name(method)
     values = {
         "method": method,
         "env_id": FETCH_PICK_AND_PLACE_ENV_ID,
-        "reward_mode": "standard",
+        "reward_mode": "dense" if method.startswith("HER-") else "standard",
         "total_timesteps": 1_000_000,
         "training_stop_mode": "timesteps",
         "target_episodes": 5_000,
@@ -251,9 +266,9 @@ def get_default_parameters_for_method(method: str) -> dict[str, Any]:
         "device": "auto",
         "verbose": 0,
     }
-    if method == "SAC":
+    if base_method == "SAC":
         values.update(batch_size=256, ent_coef="auto", net_arch_pi="256,256", net_arch_vf="256,256")
-    elif method == "TD3":
+    elif base_method == "TD3":
         values.update(learning_rate=1e-3, buffer_size=1_000_000, learning_starts=100, batch_size=100, gradient_steps=-1, net_arch_pi="400,300", net_arch_vf="400,300")
     else:
         values.update(net_arch_pi="256,256", net_arch_vf="256,256")
@@ -352,7 +367,15 @@ class SyncVectorEnvAdapter(VecEnv):
             setattr(self.vector_env.envs[index], attr_name, value)
 
     def env_method(self, method_name: str, *method_args: Any, indices: Any = None, **method_kwargs: Any) -> list[Any]:
-        return [getattr(self.vector_env.envs[index], method_name)(*method_args, **method_kwargs) for index in self._get_indices(indices)]
+        result = []
+        for index in self._get_indices(indices):
+            env = self.vector_env.envs[index]
+            target = getattr(env, "unwrapped", env)
+            method = getattr(target, method_name, None)
+            if method is None:
+                method = getattr(env, method_name)
+            result.append(method(*method_args, **method_kwargs))
+        return result
 
     def env_is_wrapped(self, wrapper_class: type[gym.Wrapper], indices: Any = None) -> list[bool]:
         return [False for _ in self._get_indices(indices)]
@@ -500,12 +523,13 @@ class FetchPickAndPlaceTrainer:
     def _make_env(config: OnPolicyConfig, render_mode: Optional[str] = None) -> gym.Env:
         _verify_mujoco_runtime()
         _ensure_gymnasium_robotics()
+        reward_mode = config.reward_mode if config.reward_mode in {"dense", "shaped"} else "standard"
         try:
-            return gym.make(config.env_id, render_mode=render_mode)
+            return make_fetch_env(render_mode=render_mode, reward_mode=reward_mode)
         except Exception as exc:  # pragma: no cover - depends on OS/display backend
             if render_mode == "rgb_array":
                 try:
-                    return gym.make(config.env_id, render_mode=None)
+                    return make_fetch_env(render_mode=None, reward_mode=reward_mode)
                 except Exception:
                     pass
             message = (
@@ -543,7 +567,8 @@ class FetchPickAndPlaceTrainer:
             "device": config.device,
             "verbose": config.verbose,
         }
-        if config.method == "PPO":
+        base_method = normalize_method_name(config.method)
+        if base_method == "PPO":
             return PPO(
                 n_steps=config.n_steps,
                 n_epochs=config.n_epochs,
@@ -555,7 +580,18 @@ class FetchPickAndPlaceTrainer:
                 **common,
             )
         off_policy = {**common, "buffer_size": config.buffer_size, "learning_starts": config.learning_starts, "tau": config.tau, "train_freq": config.train_freq, "gradient_steps": config.gradient_steps}
-        if config.method == "SAC":
+        if config.method.startswith("HER-"):
+            from stable_baselines3.her import HerReplayBuffer
+
+            replay_buffer_kwargs = {
+                "env": environment,
+                "n_sampled_goal": 4,
+                "goal_selection_strategy": "future",
+            }
+            if base_method == "SAC":
+                return SAC(ent_coef=config.ent_coef, replay_buffer_class=HerReplayBuffer, replay_buffer_kwargs=replay_buffer_kwargs, **off_policy)
+            return TD3(policy_delay=config.policy_delay, replay_buffer_class=HerReplayBuffer, replay_buffer_kwargs=replay_buffer_kwargs, **off_policy)
+        if base_method == "SAC":
             return SAC(ent_coef=config.ent_coef, **off_policy)
         return TD3(policy_delay=config.policy_delay, **off_policy)
 
