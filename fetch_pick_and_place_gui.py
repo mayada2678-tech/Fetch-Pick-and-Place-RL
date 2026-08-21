@@ -41,7 +41,7 @@ class FetchPickAndPlaceUI(base.WorkbenchUI):
         self.env_var = tk.StringVar(value="FetchPickAndPlace-v4")
         self.method_var = tk.StringVar(value="HER-SAC")
         self.selected_method = tk.StringVar(value="HER-SAC")
-        self.reward_mode_var = tk.StringVar(value="dense")
+        self.reward_mode_var = tk.StringVar(value="standard")
         self.total_timesteps_var = tk.StringVar(value="1000000")
         self.training_stop_mode_var = tk.StringVar(value="timesteps")
         self.target_episodes_var = tk.StringVar(value="5000")

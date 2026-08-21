@@ -48,6 +48,20 @@ def test_fetch_pick_and_place_supports_dense_reward_and_her_methods():
     assert "HER-TD3" in module.SUPPORTED_METHODS
 
 
+def test_her_defaults_use_sparse_and_large_replay_buffer():
+    module_path = Path(__file__).with_name("fetch_pick_and_place_logic.py")
+    spec = spec_from_file_location("fetch_pick_and_place_logic", module_path)
+    assert spec is not None and spec.loader is not None
+
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    defaults = module.get_default_parameters_for_method("HER-SAC")
+    assert defaults["reward_mode"] == "standard"
+    assert defaults["buffer_size"] >= 1_000_000
+    assert 1_000 <= defaults["learning_starts"] <= 2_000
+
+
 def test_her_replay_buffer_kwargs_match_sb3_api(monkeypatch):
     module_path = Path(__file__).with_name("fetch_pick_and_place_logic.py")
     spec = spec_from_file_location("fetch_pick_and_place_logic", module_path)
